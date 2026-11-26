@@ -1,0 +1,80 @@
+name: Generate Initial EF Core Migration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate-migration:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore dependencies and local tools
+        run: |
+          dotnet restore Qwiik.InvoiceManagement.slnx
+          dotnet tool restore
+
+      - name: Build solution (Release)
+        run: dotnet build Qwiik.InvoiceManagement.slnx --configuration Release --no-restore
+
+      - name: Generate InitialCreate EF Core migration
+        shell: powershell
+        run: |
+          if (Test-Path "Qwiik.InvoiceManagement.Infrastructure/Persistence/Migrations/*.cs") {
+            Write-Host "Migrations already exist. Skipping generation."
+          } else {
+            dotnet tool run dotnet-ef migrations add InitialCreate `
+              --project Qwiik.InvoiceManagement.Infrastructure `
+              --startup-project Qwiik.InvoiceManagement.API `
+              --output-dir Persistence/Migrations `
+              --configuration Release `
+              --no-build
+          }
+
+      - name: Start SQL Server LocalDB and verify schema
+        shell: powershell
+        run: |
+          sqllocaldb create MSSQLLocalDB -s
+          $env:ConnectionStrings__DefaultConnection = "Server=(localdb)\MSSQLLocalDB;Database=QwiikInvoiceManagementMigrationCheck;Trusted_Connection=True;TrustServerCertificate=True;"
+          dotnet tool run dotnet-ef database update `
+            --project Qwiik.InvoiceManagement.Infrastructure `
+            --startup-project Qwiik.InvoiceManagement.API `
+            --configuration Release `
+            --no-build
+
+          $conn = New-Object System.Data.SqlClient.SqlConnection($env:ConnectionStrings__DefaultConnection)
+          $conn.Open()
+          $cmd = $conn.CreateCommand()
+          $cmd.CommandText = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME IN ('Organizations','Invoices','InvoiceItems')"
+          $tableCount = [int]$cmd.ExecuteScalar()
+          $conn.Close()
+          if ($tableCount -ne 3) {
+            throw "Expected 3 tables (Organizations, Invoices, InvoiceItems), found $tableCount."
+          }
+
+      - name: Run all xUnit tests
+        run: dotnet test Qwiik.InvoiceManagement.slnx --configuration Release --no-build --verbosity normal
+
+      - name: Commit and push generated migration
+        shell: powershell
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Qwiik.InvoiceManagement.Infrastructure/Persistence/Migrations
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "Add InitialCreate EF Core 10 migration"
+            git push
+          } else {
+            Write-Host "No new migration changes to commit."
+          }

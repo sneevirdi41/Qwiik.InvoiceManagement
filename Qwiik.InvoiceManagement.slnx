@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="Qwiik.InvoiceManagement.API/Qwiik.InvoiceManagement.API.csproj" />
+  <Project Path="Qwiik.InvoiceManagement.Application/Qwiik.InvoiceManagement.Application.csproj" />
+  <Project Path="Qwiik.InvoiceManagement.Domain/Qwiik.InvoiceManagement.Domain.csproj" />
+  <Project Path="Qwiik.InvoiceManagement.Infrastructure/Qwiik.InvoiceManagement.Infrastructure.csproj" />
+  <Project Path="Qwiik.InvoiceManagement.Tests/Qwiik.InvoiceManagement.Tests.csproj" />
+</Solution>

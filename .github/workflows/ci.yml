@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore NuGet dependencies and local tools
+        run: |
+          dotnet restore Qwiik.InvoiceManagement.slnx
+          dotnet tool restore
+
+      - name: Build solution (Release)
+        run: dotnet build Qwiik.InvoiceManagement.slnx --configuration Release --no-restore
+
+      - name: Start SQL Server LocalDB
+        run: sqllocaldb create MSSQLLocalDB -s
+
+      - name: Verify EF Core migration and SQL Server schema
+        shell: powershell
+        run: |
+          $migrationsDir = "Qwiik.InvoiceManagement.Infrastructure/Persistence/Migrations"
+          if (-not (Test-Path "$migrationsDir/*.cs")) {
+            throw "EF Core migrations are missing under $migrationsDir. Generate InitialCreate and commit it before running CI."
+          }
+
+          $env:ConnectionStrings__DefaultConnection = "Server=(localdb)\MSSQLLocalDB;Database=QwiikInvoiceManagementCI;Trusted_Connection=True;TrustServerCertificate=True;"
+          dotnet tool run dotnet-ef database update `
+            --project Qwiik.InvoiceManagement.Infrastructure `
+            --startup-project Qwiik.InvoiceManagement.API `
+            --configuration Release `
+            --no-build
+
+          $conn = New-Object System.Data.SqlClient.SqlConnection($env:ConnectionStrings__DefaultConnection)
+          $conn.Open()
+          $cmd = $conn.CreateCommand()
+          $cmd.CommandText = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME IN ('Organizations','Invoices','InvoiceItems')"
+          $tableCount = [int]$cmd.ExecuteScalar()
+          $conn.Close()
+          if ($tableCount -ne 3) {
+            throw "Expected 3 tables (Organizations, Invoices, InvoiceItems), found $tableCount."
+          }
+
+      - name: Run all xUnit unit and SQL Server integration tests
+        run: dotnet test Qwiik.InvoiceManagement.slnx --configuration Release --no-build --verbosity normal
