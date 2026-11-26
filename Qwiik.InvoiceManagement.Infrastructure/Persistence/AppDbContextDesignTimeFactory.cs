@@ -12,6 +12,7 @@ public sealed class AppDbContextDesignTimeFactory : IDesignTimeDbContextFactory<
     public AppDbContext CreateDbContext(string[] args)
     {
         var connectionString = Environment.GetEnvironmentVariable("QWIIK_DESIGNTIME_CONNECTION_STRING")
+            ?? Environment.GetEnvironmentVariable("ConnectionStrings__DefaultConnection")
             ?? "Server=(localdb)\\MSSQLLocalDB;Database=QwiikInvoiceManagementDev;Trusted_Connection=True;TrustServerCertificate=True;";
 
         var optionsBuilder = new DbContextOptionsBuilder<AppDbContext>();

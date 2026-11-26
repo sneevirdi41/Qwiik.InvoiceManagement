@@ -29,7 +29,22 @@ jobs:
         run: dotnet build Qwiik.InvoiceManagement.slnx --configuration Release --no-restore
 
       - name: Start SQL Server LocalDB
-        run: sqllocaldb create MSSQLLocalDB -s
+        shell: powershell
+        run: |
+          $sqllocaldb = (Get-Command sqllocaldb -ErrorAction SilentlyContinue).Source
+          if (-not $sqllocaldb) {
+            $sqllocaldb = Get-ChildItem "C:\Program Files\Microsoft SQL Server" -Filter "SqlLocalDB.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+            if ($sqllocaldb) {
+              "$(Split-Path $sqllocaldb)" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            }
+          }
+          if (-not $sqllocaldb) {
+            throw "SqlLocalDB.exe was not found on this runner."
+          }
+
+          & $sqllocaldb create MSSQLLocalDB -s
+          if ($LASTEXITCODE -ne 0) { throw "Failed to create/start MSSQLLocalDB instance." }
+          & $sqllocaldb info MSSQLLocalDB
 
       - name: Verify EF Core migration and SQL Server schema
         shell: powershell
@@ -39,21 +54,44 @@ jobs:
             throw "EF Core migrations are missing under $migrationsDir. Generate InitialCreate and commit it before running CI."
           }
 
-          $env:ConnectionStrings__DefaultConnection = "Server=(localdb)\MSSQLLocalDB;Database=QwiikInvoiceManagementCI;Trusted_Connection=True;TrustServerCertificate=True;"
+          $connStr = "Server=(localdb)\MSSQLLocalDB;Database=QwiikInvoiceManagementCI;Trusted_Connection=True;TrustServerCertificate=True;"
+          $env:ConnectionStrings__DefaultConnection = $connStr
+          $env:QWIIK_DESIGNTIME_CONNECTION_STRING = $connStr
+
           dotnet tool run dotnet-ef database update `
             --project Qwiik.InvoiceManagement.Infrastructure `
             --startup-project Qwiik.InvoiceManagement.API `
             --configuration Release `
             --no-build
+          if ($LASTEXITCODE -ne 0) { throw "dotnet-ef database update failed." }
 
-          $conn = New-Object System.Data.SqlClient.SqlConnection($env:ConnectionStrings__DefaultConnection)
+          $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
           $conn.Open()
-          $cmd = $conn.CreateCommand()
-          $cmd.CommandText = "SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME IN ('Organizations','Invoices','InvoiceItems')"
-          $tableCount = [int]$cmd.ExecuteScalar()
-          $conn.Close()
-          if ($tableCount -ne 3) {
-            throw "Expected 3 tables (Organizations, Invoices, InvoiceItems), found $tableCount."
+          try {
+            $cmd = $conn.CreateCommand()
+            $cmd.CommandText = @"
+          SELECT
+            (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME IN ('Organizations','Invoices','InvoiceItems','__EFMigrationsHistory')) AS TableCount,
+            (SELECT COUNT(*) FROM sys.indexes WHERE name IN ('UX_Invoices_OrganizationId_InvoiceNumber','IX_Invoices_OrganizationId_Status','IX_Invoices_OrganizationId_InvoiceDate','IX_InvoiceItems_InvoiceId')) AS IndexCount,
+            (SELECT COUNT(*) FROM sys.foreign_keys WHERE parent_object_id IN (OBJECT_ID('dbo.Invoices'), OBJECT_ID('dbo.InvoiceItems'))) AS FkCount,
+            (SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE ((TABLE_NAME = 'Invoices' AND COLUMN_NAME IN ('Subtotal','TaxAmount','TotalAmount')) OR (TABLE_NAME = 'InvoiceItems' AND COLUMN_NAME IN ('Quantity','UnitPrice','LineTotal'))) AND NUMERIC_PRECISION = 18 AND NUMERIC_SCALE = 2) AS DecimalColumnCount
+          "@
+            $reader = $cmd.ExecuteReader()
+            if (-not $reader.Read()) { throw "Schema verification query returned no rows." }
+            $tableCount = [int]$reader["TableCount"]
+            $indexCount = [int]$reader["IndexCount"]
+            $fkCount = [int]$reader["FkCount"]
+            $decimalCount = [int]$reader["DecimalColumnCount"]
+            $reader.Close()
+
+            Write-Host "Verified CI schema: Tables=$tableCount/4, Indexes=$indexCount/4, ForeignKeys=$fkCount/2, Decimal18_2Columns=$decimalCount/6"
+            if ($tableCount -ne 4) { throw "Expected 4 tables (Organizations, Invoices, InvoiceItems, __EFMigrationsHistory), found $tableCount." }
+            if ($indexCount -ne 4) { throw "Expected 4 expected indexes, found $indexCount." }
+            if ($fkCount -ne 2) { throw "Expected 2 foreign keys, found $fkCount." }
+            if ($decimalCount -ne 6) { throw "Expected 6 decimal(18,2) columns, found $decimalCount." }
+          }
+          finally {
+            $conn.Close()
           }
 
       - name: Run all xUnit unit and SQL Server integration tests
