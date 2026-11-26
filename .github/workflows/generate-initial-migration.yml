@@ -30,8 +30,9 @@ jobs:
       - name: Generate InitialCreate EF Core migration
         shell: powershell
         run: |
-          if (Test-Path "Qwiik.InvoiceManagement.Infrastructure/Persistence/Migrations/*.cs") {
-            Write-Host "Migrations already exist. Skipping generation."
+          $migrationsDir = "Qwiik.InvoiceManagement.Infrastructure/Persistence/Migrations"
+          if (Test-Path "$migrationsDir/*.cs") {
+            Write-Host "Migrations already exist under $migrationsDir. Skipping generation."
           } else {
             dotnet tool run dotnet-ef migrations add InitialCreate `
               --project Qwiik.InvoiceManagement.Infrastructure `
@@ -39,7 +40,23 @@ jobs:
               --output-dir Persistence/Migrations `
               --configuration Release `
               --no-build
+            if ($LASTEXITCODE -ne 0) { throw "dotnet-ef migrations add InitialCreate failed." }
           }
+
+          $migrationFiles = Get-ChildItem -Path $migrationsDir -Filter "*_InitialCreate.cs" -ErrorAction SilentlyContinue
+          $designerFiles = Get-ChildItem -Path $migrationsDir -Filter "*_InitialCreate.Designer.cs" -ErrorAction SilentlyContinue
+          $snapshotFile = Join-Path $migrationsDir "AppDbContextModelSnapshot.cs"
+
+          if (-not $migrationFiles -or -not $designerFiles -or -not (Test-Path $snapshotFile)) {
+            $found = if (Test-Path $migrationsDir) { (Get-ChildItem -Path $migrationsDir | Select-Object -ExpandProperty Name) -join ", " } else { "<directory missing>" }
+            throw "Expected InitialCreate migration, designer, and AppDbContextModelSnapshot.cs under $migrationsDir. Found: $found"
+          }
+
+          Write-Host "Verified generated migration files under ${migrationsDir}:"
+          Get-ChildItem -Path $migrationsDir | ForEach-Object { Write-Host " - $($_.Name)" }
+
+      - name: Rebuild solution with generated migration (Release)
+        run: dotnet build Qwiik.InvoiceManagement.slnx --configuration Release --no-restore
 
       - name: Start SQL Server LocalDB and verify schema
         shell: powershell
@@ -63,6 +80,17 @@ jobs:
           $connStr = "Server=(localdb)\MSSQLLocalDB;Database=QwiikInvoiceManagementMigrationCheck;Trusted_Connection=True;TrustServerCertificate=True;"
           $env:ConnectionStrings__DefaultConnection = $connStr
           $env:QWIIK_DESIGNTIME_CONNECTION_STRING = $connStr
+
+          $migrationsOutput = (dotnet tool run dotnet-ef migrations list `
+            --project Qwiik.InvoiceManagement.Infrastructure `
+            --startup-project Qwiik.InvoiceManagement.API `
+            --configuration Release `
+            --no-build) | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "dotnet-ef migrations list failed." }
+          Write-Host $migrationsOutput
+          if ($migrationsOutput -notmatch 'InitialCreate') {
+            throw "InitialCreate was not discovered by 'dotnet-ef migrations list'."
+          }
 
           dotnet tool run dotnet-ef database update `
             --project Qwiik.InvoiceManagement.Infrastructure `
